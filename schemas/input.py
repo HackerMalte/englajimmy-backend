@@ -48,8 +48,9 @@ class RsvpCreate(BaseModel):
     """Input for submitting an RSVP from the frontend."""
     name: str = Field(..., min_length=1, max_length=255)
     email: EmailStr
-    attending: bool = True
-    message: str | None = Field(None, max_length=1000)
+    coming: bool = True
+    allergies: str | None = Field(None, max_length=500)
+    transport_assist: bool = False
 
 
 class RsvpOut(BaseModel):
@@ -57,8 +58,9 @@ class RsvpOut(BaseModel):
     id: int
     name: str
     email: str
-    attending: bool
-    message: str | None
+    coming: bool
+    allergies: str | None
+    transport_assist: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}

@@ -5,6 +5,10 @@ FastAPI app for RSVP: query and upload data from a frontend RSVP page.
 import os
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
+
+load_dotenv()  # Load .env so API_KEY and DATABASE_URL work when testing locally
+
 import psycopg2
 from fastapi import FastAPI, Depends, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,21 +28,46 @@ API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 CREATE_RSVPS_SQL = """
 CREATE TABLE IF NOT EXISTS rsvps (
-    id          SERIAL PRIMARY KEY,
-    name        VARCHAR(255) NOT NULL,
-    email       VARCHAR(255) NOT NULL,
-    attending   BOOLEAN DEFAULT true,
-    message     TEXT,
-    created_at  TIMESTAMPTZ DEFAULT now()
+    id              SERIAL PRIMARY KEY,
+    name            VARCHAR(255) NOT NULL,
+    email           VARCHAR(255) NOT NULL,
+    coming          BOOLEAN DEFAULT true,
+    allergies       VARCHAR(500),
+    transport_assist BOOLEAN DEFAULT false,
+    created_at      TIMESTAMPTZ DEFAULT now()
 );
 """
 
 
 def ensure_rsvps_table():
-    """Create rsvps table if it doesn't exist."""
+    """Create rsvps table if it doesn't exist, or migrate existing table to new schema."""
     with get_conn() as conn:
         with conn.cursor() as cur:
+            # Create table if it doesn't exist
             cur.execute(CREATE_RSVPS_SQL)
+            
+            # Check if table has old columns and migrate
+            cur.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'rsvps'
+            """)
+            existing_columns = {row[0] for row in cur.fetchall()}
+            
+            # Migrate: rename attending -> coming if needed
+            if 'attending' in existing_columns and 'coming' not in existing_columns:
+                cur.execute("ALTER TABLE rsvps RENAME COLUMN attending TO coming")
+            
+            # Migrate: drop old message column if it exists
+            if 'message' in existing_columns:
+                cur.execute("ALTER TABLE rsvps DROP COLUMN IF EXISTS message")
+            
+            # Migrate: add new columns if they don't exist
+            if 'allergies' not in existing_columns:
+                cur.execute("ALTER TABLE rsvps ADD COLUMN IF NOT EXISTS allergies VARCHAR(500)")
+            
+            if 'transport_assist' not in existing_columns:
+                cur.execute("ALTER TABLE rsvps ADD COLUMN IF NOT EXISTS transport_assist BOOLEAN DEFAULT false")
 
 
 @asynccontextmanager
@@ -90,7 +119,7 @@ def list_rsvps(
     """List all RSVPs. Requires X-API-Key header when API_KEY is set in env (recommended in production)."""
     with conn.cursor() as cur:
         cur.execute(
-            f"SELECT id, name, email, attending, message, created_at FROM {RSVPS_TABLE} ORDER BY created_at DESC"
+            f"SELECT id, name, email, coming, allergies, transport_assist, created_at FROM {RSVPS_TABLE} ORDER BY created_at DESC"
         )
         rows = cur.fetchall()
     return [RsvpOut(**row_to_rsvp(r)) for r in rows]
@@ -101,11 +130,11 @@ def create_rsvp(body: RsvpCreate, conn: psycopg2.extensions.connection = Depends
     """Submit an RSVP from the frontend form."""
     columns = ", ".join(RSVP_COLUMNS_INSERT)
     placeholders = ", ".join(["%s"] * len(RSVP_COLUMNS_INSERT))
-    sql = f"INSERT INTO {RSVPS_TABLE} ({columns}) VALUES ({placeholders}) RETURNING id, name, email, attending, message, created_at"
+    sql = f"INSERT INTO {RSVPS_TABLE} ({columns}) VALUES ({placeholders}) RETURNING id, name, email, coming, allergies, transport_assist, created_at"
     with conn.cursor() as cur:
         cur.execute(
             sql,
-            (body.name, body.email, body.attending, body.message),
+            (body.name, body.email, body.coming, body.allergies, body.transport_assist),
         )
         row = cur.fetchone()
     if not row:

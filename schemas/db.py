@@ -45,12 +45,13 @@ RSVP_COLUMNS = (
     "id",
     "name",
     "email",
-    "attending",
-    "message",
+    "coming",
+    "allergies",
+    "transport_assist",
     "created_at",
 )
 
-RSVP_COLUMNS_INSERT = ("name", "email", "attending", "message")
+RSVP_COLUMNS_INSERT = ("name", "email", "coming", "allergies", "transport_assist")
 
 
 def row_to_rsvp(row: tuple) -> dict[str, Any]:
@@ -59,7 +60,8 @@ def row_to_rsvp(row: tuple) -> dict[str, Any]:
         "id": row[0],
         "name": row[1],
         "email": row[2],
-        "attending": row[3],
-        "message": row[4],
-        "created_at": row[5],
+        "coming": row[3],
+        "allergies": row[4],
+        "transport_assist": row[5],
+        "created_at": row[6],
     }

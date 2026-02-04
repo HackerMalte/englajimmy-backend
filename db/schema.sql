@@ -11,12 +11,13 @@ CREATE TABLE IF NOT EXISTS users (
 
 -- RSVP table for frontend RSVP page
 CREATE TABLE IF NOT EXISTS rsvps (
-    id          SERIAL PRIMARY KEY,
-    name        VARCHAR(255) NOT NULL,
-    email       VARCHAR(255) NOT NULL,
-    attending   BOOLEAN DEFAULT true,
-    message     TEXT,
-    created_at  TIMESTAMPTZ DEFAULT now()
+    id              SERIAL PRIMARY KEY,
+    name            VARCHAR(255) NOT NULL,
+    email           VARCHAR(255) NOT NULL,
+    coming          BOOLEAN DEFAULT true,
+    allergies       VARCHAR(500),
+    transport_assist BOOLEAN DEFAULT false,
+    created_at      TIMESTAMPTZ DEFAULT now()
 );
 
 -- Add more tables below, then add matching Pydantic models in schemas/input.py

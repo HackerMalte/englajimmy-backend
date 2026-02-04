@@ -64,3 +64,9 @@ class RsvpOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class RsvpSubmitResponse(BaseModel):
+    """Response after submitting an RSVP (POST /rsvps)."""
+    status: str = "ok"
+    message: str = "RSVP submitted successfully."

@@ -17,10 +17,14 @@ if not DATABASE_URL:
     )
 
 
+# Fail fast if DB is unreachable (e.g. Railway not reachable from local network)
+CONNECT_TIMEOUT_SECONDS = 10
+
+
 @contextmanager
 def get_conn():
     """Context manager: yields a DB connection, closes on exit."""
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = psycopg2.connect(DATABASE_URL, connect_timeout=CONNECT_TIMEOUT_SECONDS)
     try:
         yield conn
         conn.commit()

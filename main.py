@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 
 from db.connection import get_conn
-from schemas.input import RsvpCreate, RsvpOut
+from schemas.input import RsvpCreate, RsvpOut, RsvpSubmitResponse
 from schemas.db import (
     RSVPS_TABLE,
     RSVP_COLUMNS_INSERT,
@@ -134,19 +134,18 @@ def list_rsvps(
     return [RsvpOut(**row_to_rsvp(r)) for r in rows]
 
 
-@app.post("/rsvps", response_model=RsvpOut, status_code=201)
+@app.post("/rsvps", response_model=RsvpSubmitResponse, status_code=201)
 def create_rsvp(body: RsvpCreate, conn: psycopg2.extensions.connection = Depends(get_db)):
-    """Submit an RSVP from the frontend form. One RSVP per email."""
+    """Submit an RSVP from the frontend form. One RSVP per email. Returns status only."""
     columns = ", ".join(RSVP_COLUMNS_INSERT)
     placeholders = ", ".join(["%s"] * len(RSVP_COLUMNS_INSERT))
-    sql = f"INSERT INTO {RSVPS_TABLE} ({columns}) VALUES ({placeholders}) RETURNING id, name, email, coming, allergies, transport_assist, created_at"
+    sql = f"INSERT INTO {RSVPS_TABLE} ({columns}) VALUES ({placeholders})"
     try:
         with conn.cursor() as cur:
             cur.execute(
                 sql,
                 (body.name, body.email, body.coming, body.allergies, body.transport_assist),
             )
-            row = cur.fetchone()
     except IntegrityError as e:
         if e.pgcode == "23505":  # unique_violation
             raise HTTPException(
@@ -154,9 +153,7 @@ def create_rsvp(body: RsvpCreate, conn: psycopg2.extensions.connection = Depends
                 detail="An RSVP with this email address has already been submitted.",
             ) from e
         raise
-    if not row:
-        raise HTTPException(status_code=500, detail="Insert failed")
-    return RsvpOut(**row_to_rsvp(row))
+    return RsvpSubmitResponse()
 
 
 @app.get("/health")

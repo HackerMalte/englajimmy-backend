@@ -9,11 +9,10 @@ import psycopg2
 from schemas.input import UserCreate
 from schemas.db import USERS_TABLE, USER_COLUMNS_INSERT
 
-# Prefer DATABASE_URL env var; fallback for local runs
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://postgres:wAQnovYEHldUZBxlvZaUfKekRLsthkMf@yamabiko.proxy.rlwy.net:36616/railway",
-)
+# Set DATABASE_URL in .env for local runs, or in Railway when Postgres is linked.
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise SystemExit("DATABASE_URL environment variable is not set. Add it to .env or your environment.")
 
 # Sample data — validated by Pydantic before insert
 SAMPLES = [

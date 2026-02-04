@@ -135,8 +135,12 @@ def list_rsvps(
 
 
 @app.post("/rsvps", response_model=RsvpSubmitResponse, status_code=201)
-def create_rsvp(body: RsvpCreate, conn: psycopg2.extensions.connection = Depends(get_db)):
-    """Submit an RSVP from the frontend form. One RSVP per email. Returns status only."""
+def create_rsvp(
+    _: None = Depends(require_api_key),
+    body: RsvpCreate = ...,
+    conn: psycopg2.extensions.connection = Depends(get_db),
+):
+    """Submit an RSVP from the frontend form. One RSVP per email. Requires X-API-Key when API_KEY is set."""
     columns = ", ".join(RSVP_COLUMNS_INSERT)
     placeholders = ", ".join(["%s"] * len(RSVP_COLUMNS_INSERT))
     sql = f"INSERT INTO {RSVPS_TABLE} ({columns}) VALUES ({placeholders})"

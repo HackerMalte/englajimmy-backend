@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS rsvps (
     id              SERIAL PRIMARY KEY,
     name            VARCHAR(255) NOT NULL,
-    email           VARCHAR(255) NOT NULL,
+    email           VARCHAR(255) NOT NULL UNIQUE,
     coming          BOOLEAN DEFAULT true,
     allergies       VARCHAR(500),
     transport_assist BOOLEAN DEFAULT false,

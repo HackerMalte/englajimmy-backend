@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()  # Load .env so API_KEY and DATABASE_URL work when testing locally
 
 import psycopg2
+from psycopg2 import IntegrityError
 from fastapi import FastAPI, Depends, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
@@ -30,7 +31,7 @@ CREATE_RSVPS_SQL = """
 CREATE TABLE IF NOT EXISTS rsvps (
     id              SERIAL PRIMARY KEY,
     name            VARCHAR(255) NOT NULL,
-    email           VARCHAR(255) NOT NULL,
+    email           VARCHAR(255) NOT NULL UNIQUE,
     coming          BOOLEAN DEFAULT true,
     allergies       VARCHAR(500),
     transport_assist BOOLEAN DEFAULT false,
@@ -68,6 +69,14 @@ def ensure_rsvps_table():
             
             if 'transport_assist' not in existing_columns:
                 cur.execute("ALTER TABLE rsvps ADD COLUMN IF NOT EXISTS transport_assist BOOLEAN DEFAULT false")
+            
+            # Ensure one RSVP per email: add unique constraint if not already present
+            cur.execute("""
+                SELECT 1 FROM pg_constraint 
+                WHERE conrelid = 'rsvps'::regclass AND conname = 'rsvps_email_key'
+            """)
+            if cur.fetchone() is None:
+                cur.execute("ALTER TABLE rsvps ADD CONSTRAINT rsvps_email_key UNIQUE (email)")
 
 
 @asynccontextmanager
@@ -127,16 +136,24 @@ def list_rsvps(
 
 @app.post("/rsvps", response_model=RsvpOut, status_code=201)
 def create_rsvp(body: RsvpCreate, conn: psycopg2.extensions.connection = Depends(get_db)):
-    """Submit an RSVP from the frontend form."""
+    """Submit an RSVP from the frontend form. One RSVP per email."""
     columns = ", ".join(RSVP_COLUMNS_INSERT)
     placeholders = ", ".join(["%s"] * len(RSVP_COLUMNS_INSERT))
     sql = f"INSERT INTO {RSVPS_TABLE} ({columns}) VALUES ({placeholders}) RETURNING id, name, email, coming, allergies, transport_assist, created_at"
-    with conn.cursor() as cur:
-        cur.execute(
-            sql,
-            (body.name, body.email, body.coming, body.allergies, body.transport_assist),
-        )
-        row = cur.fetchone()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql,
+                (body.name, body.email, body.coming, body.allergies, body.transport_assist),
+            )
+            row = cur.fetchone()
+    except IntegrityError as e:
+        if e.pgcode == "23505":  # unique_violation
+            raise HTTPException(
+                status_code=409,
+                detail="An RSVP with this email address has already been submitted.",
+            ) from e
+        raise
     if not row:
         raise HTTPException(status_code=500, detail="Insert failed")
     return RsvpOut(**row_to_rsvp(row))

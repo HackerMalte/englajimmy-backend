@@ -70,3 +70,4 @@ class RsvpSubmitResponse(BaseModel):
     """Response after submitting an RSVP (POST /rsvps)."""
     status: str = "ok"
     message: str = "RSVP submitted successfully."
+    updated: bool = False  # True if an existing RSVP was replaced

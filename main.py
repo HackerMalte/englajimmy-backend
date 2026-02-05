@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 load_dotenv()  # Load .env so API_KEY and DATABASE_URL work when testing locally
 
 import psycopg2
-from psycopg2 import IntegrityError
 from fastapi import FastAPI, Depends, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
@@ -31,11 +30,12 @@ CREATE_RSVPS_SQL = """
 CREATE TABLE IF NOT EXISTS rsvps (
     id              SERIAL PRIMARY KEY,
     name            VARCHAR(255) NOT NULL,
-    email           VARCHAR(255) NOT NULL UNIQUE,
+    email           VARCHAR(255) NOT NULL,
     coming          BOOLEAN DEFAULT true,
     allergies       VARCHAR(500),
     transport_assist BOOLEAN DEFAULT false,
-    created_at      TIMESTAMPTZ DEFAULT now()
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (name, email)
 );
 """
 
@@ -70,13 +70,21 @@ def ensure_rsvps_table():
             if 'transport_assist' not in existing_columns:
                 cur.execute("ALTER TABLE rsvps ADD COLUMN IF NOT EXISTS transport_assist BOOLEAN DEFAULT false")
             
-            # Ensure one RSVP per email: add unique constraint if not already present
+            # Remove old email-only unique constraint if it exists
             cur.execute("""
                 SELECT 1 FROM pg_constraint 
                 WHERE conrelid = 'rsvps'::regclass AND conname = 'rsvps_email_key'
             """)
+            if cur.fetchone() is not None:
+                cur.execute("ALTER TABLE rsvps DROP CONSTRAINT rsvps_email_key")
+            
+            # Ensure one RSVP per (name, email) combo: add unique constraint if not already present
+            cur.execute("""
+                SELECT 1 FROM pg_constraint 
+                WHERE conrelid = 'rsvps'::regclass AND conname = 'rsvps_name_email_key'
+            """)
             if cur.fetchone() is None:
-                cur.execute("ALTER TABLE rsvps ADD CONSTRAINT rsvps_email_key UNIQUE (email)")
+                cur.execute("ALTER TABLE rsvps ADD CONSTRAINT rsvps_name_email_key UNIQUE (name, email)")
 
 
 @asynccontextmanager
@@ -140,24 +148,34 @@ def create_rsvp(
     body: RsvpCreate = ...,
     conn: psycopg2.extensions.connection = Depends(get_db),
 ):
-    """Submit an RSVP from the frontend form. One RSVP per email. Requires X-API-Key when API_KEY is set."""
-    columns = ", ".join(RSVP_COLUMNS_INSERT)
-    placeholders = ", ".join(["%s"] * len(RSVP_COLUMNS_INSERT))
-    sql = f"INSERT INTO {RSVPS_TABLE} ({columns}) VALUES ({placeholders})"
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                sql,
-                (body.name, body.email, body.coming, body.allergies, body.transport_assist),
-            )
-    except IntegrityError as e:
-        if e.pgcode == "23505":  # unique_violation
-            raise HTTPException(
-                status_code=409,
-                detail="An RSVP with this email address has already been submitted.",
-            ) from e
-        raise
-    return RsvpSubmitResponse()
+    """
+    Submit an RSVP. One RSVP per (name, email) combo.
+    If the same name+email already exists, replaces the old entry and returns updated=true.
+    Requires X-API-Key when API_KEY is set.
+    """
+    # Upsert: insert or replace if (name, email) already exists
+    sql = f"""
+        INSERT INTO {RSVPS_TABLE} (name, email, coming, allergies, transport_assist, created_at)
+        VALUES (%s, %s, %s, %s, %s, now())
+        ON CONFLICT (name, email) DO UPDATE SET
+            coming = EXCLUDED.coming,
+            allergies = EXCLUDED.allergies,
+            transport_assist = EXCLUDED.transport_assist,
+            created_at = now()
+        RETURNING (xmax = 0) AS inserted
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            sql,
+            (body.name, body.email, body.coming, body.allergies, body.transport_assist),
+        )
+        row = cur.fetchone()
+    
+    was_inserted = row[0] if row else True  # xmax=0 means INSERT, otherwise UPDATE
+    if was_inserted:
+        return RsvpSubmitResponse(status="ok", message="RSVP submitted successfully.", updated=False)
+    else:
+        return RsvpSubmitResponse(status="ok", message="RSVP updated successfully.", updated=True)
 
 
 @app.get("/health")

@@ -14,9 +14,23 @@ from fastapi import HTTPException, Request
 
 WINDOW_SECONDS = 60 * 60
 
-# Per IP, per hour. A guest emptying a camera roll stays well under these.
-MAX_PRESIGN_REQUESTS = 40
-MAX_FILES = 300
+# Two budgets per IP per hour, with distinct jobs:
+#
+#   MAX_FILES     bounds how much can land in the bucket. This is the one meant
+#                 to bind, and it is sized for a guest emptying a camera roll.
+#   MAX_REQUESTS  bounds request flooding, nothing else. It must stay well
+#                 above what legitimate uploading costs, or it binds first and
+#                 the file budget never applies.
+#
+# Getting one file into the bucket costs roughly 1.25 requests: uploads are
+# batched four at a time for the upload-url call, then each file is recorded
+# individually. So MAX_FILES files cost about MAX_FILES * 1.25 requests, and
+# MAX_REQUESTS is set above that with room to spare.
+#
+# An earlier version capped requests at 40, which blocked real guests after
+# about 32 files while the 300-file budget sat unused.
+MAX_FILES = 600
+MAX_REQUESTS = 1_000
 
 _requests: dict[str, deque[float]] = defaultdict(deque)
 _files: dict[str, deque[float]] = defaultdict(deque)
@@ -41,6 +55,11 @@ def _prune(stamps: deque[float], now: float) -> None:
 def check_upload_quota(request: Request, file_count: int = 1) -> None:
     """
     Charge one request plus `file_count` files against this IP's hourly budget.
+
+    Pass file_count=0 for calls that do not add a new file — recording an upload
+    that was already counted when its upload URL was issued, for instance.
+    Counting it twice would halve the effective file budget.
+
     Raises 429 with a Swedish message the frontend can show as-is.
     """
     now = time.monotonic()
@@ -51,7 +70,7 @@ def check_upload_quota(request: Request, file_count: int = 1) -> None:
     _prune(request_stamps, now)
     _prune(file_stamps, now)
 
-    if len(request_stamps) >= MAX_PRESIGN_REQUESTS:
+    if len(request_stamps) >= MAX_REQUESTS:
         raise HTTPException(
             status_code=429,
             detail="För många uppladdningar just nu. Försök igen om en stund.",

@@ -65,3 +65,48 @@ def row_to_rsvp(row: tuple) -> dict[str, Any]:
         "transport_assist": row[5],
         "created_at": row[6],
     }
+
+
+# ----- Photos table (guest photo/video uploads) -----
+
+PHOTOS_TABLE = "photos"
+
+PHOTO_COLUMNS = (
+    "id",
+    "storage_key",
+    "uploader_name",
+    "caption",
+    "content_type",
+    "size_bytes",
+    "width",
+    "height",
+    "duration_seconds",
+    "created_at",
+)
+
+PHOTO_COLUMNS_INSERT = (
+    "storage_key",
+    "uploader_name",
+    "caption",
+    "content_type",
+    "size_bytes",
+    "width",
+    "height",
+    "duration_seconds",
+)
+
+
+def row_to_photo(row: tuple) -> dict[str, Any]:
+    """Map a DB row to a dict for PhotoOut."""
+    return {
+        "id": row[0],
+        "storage_key": row[1],
+        "uploader_name": row[2],
+        "caption": row[3],
+        "content_type": row[4],
+        "size_bytes": row[5],
+        "width": row[6],
+        "height": row[7],
+        "duration_seconds": row[8],
+        "created_at": row[9],
+    }

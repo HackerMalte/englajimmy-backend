@@ -19,6 +19,7 @@ from db.connection import get_conn
 from ratelimit import check_upload_quota
 from schemas.input import (
     PhotoCountOut,
+    PhotoPublicOut,
     PhotoCreate,
     PhotoCreateResponse,
     PhotoOut,
@@ -423,3 +424,39 @@ def cleanup_orphans(
     ]
     removed = storage.delete_objects(orphans)
     return {"status": "ok", "deleted": removed}
+
+
+@app.get("/photos/gallery", response_model=list[PhotoPublicOut])
+def list_gallery(
+    _: None = Depends(require_storage),
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    conn: psycopg2.extensions.connection = Depends(get_db),
+):
+    """
+    Public gallery listing. Anyone can read this.
+
+    Returns only what the grid needs to draw itself — no uploader names, no
+    captions, no sizes, no timestamps. Separate from GET /photos, which stays
+    admin-only and carries the full metadata.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT id, storage_key, content_type, width, height
+                FROM {PHOTOS_TABLE}
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s""",
+            (limit, offset),
+        )
+        rows = cur.fetchall()
+
+    return [
+        PhotoPublicOut(
+            id=row[0],
+            url=storage.create_download_url(row[1]),
+            content_type=row[2],
+            width=row[3],
+            height=row[4],
+        )
+        for row in rows
+    ]

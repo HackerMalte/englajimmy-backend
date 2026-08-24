@@ -138,3 +138,17 @@ class PhotoCreateResponse(BaseModel):
     status: str = "ok"
     message: str = "Bilden är uppladdad."
     id: int
+
+
+class PhotoPublicOut(BaseModel):
+    """
+    A photo as shown in the public gallery.
+
+    Deliberately minimal: no uploader name, caption, file size or timestamp.
+    Dimensions are included so the grid can reserve space and avoid reflow.
+    """
+    id: int
+    url: str
+    content_type: str
+    width: int | None
+    height: int | None

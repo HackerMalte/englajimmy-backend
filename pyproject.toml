@@ -9,6 +9,7 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "pydantic[email]>=2.0",
     "psycopg2-binary>=2.9",
+    "boto3>=1.43.78",
 ]
 
 [tool.uv]

@@ -7,10 +7,11 @@ service — no request timeouts, no memory pressure, and no double transfer.
 Incremental: a file already present with a matching size is skipped, so this is
 safe and cheap to re-run as more guests upload.
 
-Files are named from the database metadata where available, so you get
-    2026-08-24_1323_Anna-Andersson_07.jpg
-rather than a bare UUID. Set API_KEY (and optionally API_BASE) for that;
-without it, files keep their storage keys.
+Files land in one folder per guest, named from the database metadata:
+    Anna-Andersson/2026-08-24_1323_007.jpg
+    Elise-Harrysson/2026-08-24_1401_008.jpg
+Set API_KEY (and optionally API_BASE) for that; without it, everything goes to
+_okand-gast with its storage key.
 
 Usage (production credentials live in .env.prod, kept out of git):
     uv run --env-file .env.prod python download_photos.py ./wedding-photos
@@ -61,13 +62,17 @@ def fetch_metadata() -> dict[str, dict]:
     return {row["storage_key"]: row for row in rows}
 
 
-def local_name(key: str, row: dict | None) -> str:
+def local_path(key: str, row: dict | None) -> Path:
+    """
+    Where a file lands: one folder per guest, so you can see at a glance who
+    sent what. Files with no name recorded go to _okand-gast.
+    """
     extension = key.rsplit(".", 1)[-1]
     if not row:
-        return key.split("/")[-1]
+        return Path("_okand-gast") / key.split("/")[-1]
     stamp = str(row.get("created_at", ""))[:16].replace("T", "_").replace(":", "")
-    who = safe(row.get("uploader_name") or "okand-gast")
-    return f"{stamp}_{who}_{row['id']:03d}.{extension}"
+    who = safe(row.get("uploader_name") or "") or "_okand-gast"
+    return Path(who) / f"{stamp}_{row['id']:03d}.{extension}"
 
 
 def main() -> int:
@@ -90,7 +95,8 @@ def main() -> int:
 
     planned, skipped = [], 0
     for key, size, _modified in objects:
-        destination = target / local_name(key, metadata.get(key))
+        destination = target / local_path(key, metadata.get(key))
+        destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists() and destination.stat().st_size == size:
             skipped += 1
             continue
@@ -101,7 +107,8 @@ def main() -> int:
 
     if dry_run:
         for key, size, destination in planned:
-            print(f"  would download {destination.name}  ({size / 1024:.0f} kB)")
+            rel = destination.relative_to(target)
+            print(f"  would download {rel}  ({size / 1024:.0f} kB)")
         print(f"\n{len(planned)} file(s) would be downloaded.")
         return 0
 
@@ -119,7 +126,7 @@ def main() -> int:
         partial = destination.with_suffix(destination.suffix + ".part")
         client.download_file(storage.S3_BUCKET, key, str(partial))
         partial.replace(destination)
-        return destination.name
+        return str(destination.relative_to(target))
 
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         for name in pool.map(grab, planned):

@@ -281,7 +281,9 @@ def create_photo(
     bucket first, so a caller cannot invent rows for files that do not exist,
     and the stored size is the bucket's rather than the client's claim.
     """
-    check_upload_quota(request)
+    # file_count=0: this file was already counted against the file budget when
+    # its upload URL was issued. Counting it again would halve the budget.
+    check_upload_quota(request, file_count=0)
 
     if not body.storage_key.startswith(f"{storage.KEY_PREFIX}/"):
         raise HTTPException(status_code=400, detail="Ogiltig fil-referens.")

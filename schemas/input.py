@@ -104,9 +104,6 @@ class PhotoUploadResponse(BaseModel):
 class PhotoCreate(BaseModel):
     """Record a file that finished uploading."""
     storage_key: str = Field(..., min_length=1, max_length=500)
-    # Small rendition for the gallery grid, uploaded by the browser alongside
-    # the full file. Optional: a photo without one still records fine.
-    thumb_key: str | None = Field(None, min_length=1, max_length=500)
     uploader_name: str | None = Field(None, max_length=255)
     caption: str | None = Field(None, max_length=500)
     width: int | None = Field(None, ge=0)
@@ -118,7 +115,6 @@ class PhotoOut(BaseModel):
     """A stored photo/video, as returned to the admin gallery."""
     id: int
     storage_key: str
-    thumb_key: str | None = None
     uploader_name: str | None
     caption: str | None
     content_type: str
@@ -128,7 +124,6 @@ class PhotoOut(BaseModel):
     duration_seconds: float | None
     created_at: datetime
     url: str | None = None  # presigned, added per request
-    thumb_url: str | None = None  # presigned thumbnail, when one exists
 
     model_config = {"from_attributes": True}
 
@@ -154,9 +149,6 @@ class PhotoPublicOut(BaseModel):
     """
     id: int
     url: str
-    # Small rendition for the grid. Falls back to url when no thumbnail exists,
-    # so the grid can always render something.
-    thumb_url: str | None
     content_type: str
     width: int | None
     height: int | None

@@ -251,26 +251,3 @@ def delete_objects(keys: list[str]) -> int:
         )
         removed += len(batch)
     return removed
-
-
-def read_object(key: str) -> bytes:
-    """Fetch a whole object. Used by the thumbnail backfill; read-only."""
-    response = get_client().get_object(Bucket=S3_BUCKET, Key=key)
-    try:
-        return response["Body"].read()
-    finally:
-        response["Body"].close()
-
-
-def upload_bytes(data: bytes, content_type: str) -> str:
-    """
-    Store new bytes under a fresh random key and return the key.
-
-    Always a brand-new UUID key: this can add objects to the bucket but can
-    never overwrite one that exists.
-    """
-    key = build_key(content_type)
-    get_client().put_object(
-        Bucket=S3_BUCKET, Key=key, Body=data, ContentType=content_type
-    )
-    return key

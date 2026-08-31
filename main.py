@@ -207,6 +207,7 @@ CREATE_PHOTOS_SQL = """
 CREATE TABLE IF NOT EXISTS photos (
     id               SERIAL PRIMARY KEY,
     storage_key      VARCHAR(500) NOT NULL UNIQUE,
+    thumb_key        VARCHAR(500),
     uploader_name    VARCHAR(255),
     caption          VARCHAR(500),
     content_type     VARCHAR(100) NOT NULL,
@@ -221,10 +222,13 @@ CREATE INDEX IF NOT EXISTS photos_created_at_idx ON photos (created_at DESC);
 
 
 def ensure_photos_table():
-    """Create the photos table if it doesn't exist."""
+    """Create the photos table if it doesn't exist, and add newer columns."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(CREATE_PHOTOS_SQL)
+            cur.execute(
+                "ALTER TABLE photos ADD COLUMN IF NOT EXISTS thumb_key VARCHAR(500)"
+            )
 
 
 def require_storage() -> None:
@@ -301,12 +305,22 @@ def create_photo(
             detail="Filen verkar inte vara en bild eller film.",
         )
 
+    # The thumbnail is a nicety: verify it like the main file, but a missing or
+    # bad one must never sink the photo itself — record without it instead.
+    thumb_key = body.thumb_key
+    if thumb_key is not None:
+        if not thumb_key.startswith(f"{storage.KEY_PREFIX}/") or thumb_key == body.storage_key:
+            thumb_key = None
+        elif storage.verify_stored_object(thumb_key) is None:
+            thumb_key = None
+
     sql = f"""
         INSERT INTO {PHOTOS_TABLE}
-            (storage_key, uploader_name, caption, content_type, size_bytes,
+            (storage_key, thumb_key, uploader_name, caption, content_type, size_bytes,
              width, height, duration_seconds, created_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
         ON CONFLICT (storage_key) DO UPDATE SET
+            thumb_key = COALESCE(EXCLUDED.thumb_key, {PHOTOS_TABLE}.thumb_key),
             uploader_name = EXCLUDED.uploader_name,
             caption = EXCLUDED.caption
         RETURNING id
@@ -316,6 +330,7 @@ def create_photo(
             sql,
             (
                 body.storage_key,
+                thumb_key,
                 body.uploader_name,
                 body.caption,
                 content_type,
@@ -356,7 +371,7 @@ def list_photos(
     """
     with conn.cursor() as cur:
         cur.execute(
-            f"""SELECT id, storage_key, uploader_name, caption, content_type,
+            f"""SELECT id, storage_key, thumb_key, uploader_name, caption, content_type,
                        size_bytes, width, height, duration_seconds, created_at
                 FROM {PHOTOS_TABLE}
                 ORDER BY created_at DESC
@@ -369,6 +384,8 @@ def list_photos(
     for r in rows:
         data = row_to_photo(r)
         data["url"] = storage.create_download_url(data["storage_key"])
+        if data["thumb_key"]:
+            data["thumb_url"] = storage.create_download_url(data["thumb_key"])
         photos.append(PhotoOut(**data))
     return photos
 
@@ -383,7 +400,7 @@ def delete_photo(
     """Delete an upload from both the bucket and the table. Admin only."""
     with conn.cursor() as cur:
         cur.execute(
-            f"DELETE FROM {PHOTOS_TABLE} WHERE id = %s RETURNING storage_key",
+            f"DELETE FROM {PHOTOS_TABLE} WHERE id = %s RETURNING storage_key, thumb_key",
             (photo_id,),
         )
         row = cur.fetchone()
@@ -392,6 +409,8 @@ def delete_photo(
         raise HTTPException(status_code=404, detail="Bilden hittades inte.")
 
     storage.delete_object(row[0])
+    if row[1]:
+        storage.delete_object(row[1])
 
 
 @app.post("/photos/cleanup-orphans")
@@ -416,8 +435,12 @@ def cleanup_orphans(
     )
 
     with conn.cursor() as cur:
-        cur.execute(f"SELECT storage_key FROM {PHOTOS_TABLE}")
-        known = {row[0] for row in cur.fetchall()}
+        cur.execute(f"SELECT storage_key, thumb_key FROM {PHOTOS_TABLE}")
+        known = set()
+        for storage_key, thumb_key in cur.fetchall():
+            known.add(storage_key)
+            if thumb_key:
+                known.add(thumb_key)
 
     orphans = [
         key
@@ -444,7 +467,7 @@ def list_gallery(
     """
     with conn.cursor() as cur:
         cur.execute(
-            f"""SELECT id, storage_key, content_type, width, height
+            f"""SELECT id, storage_key, thumb_key, content_type, width, height
                 FROM {PHOTOS_TABLE}
                 ORDER BY created_at DESC
                 LIMIT %s OFFSET %s""",
@@ -456,9 +479,93 @@ def list_gallery(
         PhotoPublicOut(
             id=row[0],
             url=storage.create_download_url(row[1]),
-            content_type=row[2],
-            width=row[3],
-            height=row[4],
+            thumb_url=storage.create_download_url(row[2]) if row[2] else None,
+            content_type=row[3],
+            width=row[4],
+            height=row[5],
         )
         for row in rows
     ]
+
+
+THUMB_MAX_DIMENSION = 640
+THUMB_JPEG_QUALITY = 72
+
+
+@app.post("/photos/backfill-thumbnails")
+def backfill_thumbnails(
+    _: None = Depends(require_api_key),
+    __: None = Depends(require_storage),
+    limit: int = Query(25, ge=1, le=100),
+    conn: psycopg2.extensions.connection = Depends(get_db),
+):
+    """
+    Generate thumbnails for photos uploaded before thumbnails existed.
+
+    Deliberately loss-proof: originals are only ever read, thumbnails are
+    written under fresh random keys (so nothing can be overwritten), and a
+    row's thumb_key is set only after the new object is confirmed present in
+    the bucket. Only rows without a thumbnail are touched, and the only column
+    written is thumb_key — so the run is idempotent and safe to repeat or
+    abort at any point. A photo that fails is skipped and reported, never
+    deleted.
+
+    Videos are skipped: extracting a poster frame needs ffmpeg, which this
+    service does not carry. Their tiles fall back to the full file.
+
+    Processes up to `limit` rows per call and reports how many remain, so no
+    single request runs long enough to hit a proxy timeout. Admin only.
+    """
+    import io
+
+    from PIL import Image, ImageOps
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT id, storage_key, content_type FROM {PHOTOS_TABLE}
+                WHERE thumb_key IS NULL AND content_type LIKE 'image/%%'
+                ORDER BY id
+                LIMIT %s""",
+            (limit,),
+        )
+        candidates = cur.fetchall()
+
+    generated, failed = 0, []
+    for photo_id, storage_key, _content_type in candidates:
+        try:
+            original = storage.read_object(storage_key)
+            image = Image.open(io.BytesIO(original))
+            # Phone photos carry their rotation in EXIF; bake it in so the
+            # thumbnail is not sideways.
+            image = ImageOps.exif_transpose(image)
+            image.thumbnail((THUMB_MAX_DIMENSION, THUMB_MAX_DIMENSION))
+            buffer = io.BytesIO()
+            image.convert("RGB").save(
+                buffer, format="JPEG", quality=THUMB_JPEG_QUALITY, optimize=True
+            )
+            thumb_key = storage.upload_bytes(buffer.getvalue(), "image/jpeg")
+
+            # Belt and braces: point the row at the thumb only once the bucket
+            # confirms the object landed.
+            exists, _size = storage.object_exists(thumb_key)
+            if not exists:
+                failed.append(photo_id)
+                continue
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE {PHOTOS_TABLE} SET thumb_key = %s WHERE id = %s AND thumb_key IS NULL",
+                    (thumb_key, photo_id),
+                )
+            generated += 1
+        except Exception:  # noqa: BLE001 - one bad file must not stop the rest
+            failed.append(photo_id)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT count(*) FROM {PHOTOS_TABLE}
+                WHERE thumb_key IS NULL AND content_type LIKE 'image/%%'"""
+        )
+        remaining = cur.fetchone()[0]
+
+    return {"status": "ok", "generated": generated, "remaining": remaining, "failed": failed}

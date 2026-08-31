@@ -20,6 +20,7 @@ from ratelimit import check_upload_quota
 from schemas.input import (
     PhotoCountOut,
     PhotoPublicOut,
+    PhotoThumbnailAttach,
     PhotoCreate,
     PhotoCreateResponse,
     PhotoOut,
@@ -207,6 +208,7 @@ CREATE_PHOTOS_SQL = """
 CREATE TABLE IF NOT EXISTS photos (
     id               SERIAL PRIMARY KEY,
     storage_key      VARCHAR(500) NOT NULL UNIQUE,
+    thumb_key        VARCHAR(500),
     uploader_name    VARCHAR(255),
     caption          VARCHAR(500),
     content_type     VARCHAR(100) NOT NULL,
@@ -221,10 +223,13 @@ CREATE INDEX IF NOT EXISTS photos_created_at_idx ON photos (created_at DESC);
 
 
 def ensure_photos_table():
-    """Create the photos table if it doesn't exist."""
+    """Create the photos table if it doesn't exist, and add newer columns."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(CREATE_PHOTOS_SQL)
+            cur.execute(
+                "ALTER TABLE photos ADD COLUMN IF NOT EXISTS thumb_key VARCHAR(500)"
+            )
 
 
 def require_storage() -> None:
@@ -301,12 +306,22 @@ def create_photo(
             detail="Filen verkar inte vara en bild eller film.",
         )
 
+    # The thumbnail is a nicety: verify it like the main file, but a missing or
+    # bad one must never sink the photo itself — record without it instead.
+    thumb_key = body.thumb_key
+    if thumb_key is not None:
+        if not thumb_key.startswith(f"{storage.KEY_PREFIX}/") or thumb_key == body.storage_key:
+            thumb_key = None
+        elif storage.verify_stored_object(thumb_key) is None:
+            thumb_key = None
+
     sql = f"""
         INSERT INTO {PHOTOS_TABLE}
-            (storage_key, uploader_name, caption, content_type, size_bytes,
+            (storage_key, thumb_key, uploader_name, caption, content_type, size_bytes,
              width, height, duration_seconds, created_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
         ON CONFLICT (storage_key) DO UPDATE SET
+            thumb_key = COALESCE(EXCLUDED.thumb_key, {PHOTOS_TABLE}.thumb_key),
             uploader_name = EXCLUDED.uploader_name,
             caption = EXCLUDED.caption
         RETURNING id
@@ -316,6 +331,7 @@ def create_photo(
             sql,
             (
                 body.storage_key,
+                thumb_key,
                 body.uploader_name,
                 body.caption,
                 content_type,
@@ -356,7 +372,7 @@ def list_photos(
     """
     with conn.cursor() as cur:
         cur.execute(
-            f"""SELECT id, storage_key, uploader_name, caption, content_type,
+            f"""SELECT id, storage_key, thumb_key, uploader_name, caption, content_type,
                        size_bytes, width, height, duration_seconds, created_at
                 FROM {PHOTOS_TABLE}
                 ORDER BY created_at DESC
@@ -369,6 +385,8 @@ def list_photos(
     for r in rows:
         data = row_to_photo(r)
         data["url"] = storage.create_download_url(data["storage_key"])
+        if data["thumb_key"]:
+            data["thumb_url"] = storage.create_download_url(data["thumb_key"])
         photos.append(PhotoOut(**data))
     return photos
 
@@ -383,7 +401,7 @@ def delete_photo(
     """Delete an upload from both the bucket and the table. Admin only."""
     with conn.cursor() as cur:
         cur.execute(
-            f"DELETE FROM {PHOTOS_TABLE} WHERE id = %s RETURNING storage_key",
+            f"DELETE FROM {PHOTOS_TABLE} WHERE id = %s RETURNING storage_key, thumb_key",
             (photo_id,),
         )
         row = cur.fetchone()
@@ -392,6 +410,8 @@ def delete_photo(
         raise HTTPException(status_code=404, detail="Bilden hittades inte.")
 
     storage.delete_object(row[0])
+    if row[1]:
+        storage.delete_object(row[1])
 
 
 @app.post("/photos/cleanup-orphans")
@@ -416,8 +436,12 @@ def cleanup_orphans(
     )
 
     with conn.cursor() as cur:
-        cur.execute(f"SELECT storage_key FROM {PHOTOS_TABLE}")
-        known = {row[0] for row in cur.fetchall()}
+        cur.execute(f"SELECT storage_key, thumb_key FROM {PHOTOS_TABLE}")
+        known = set()
+        for storage_key, thumb_key in cur.fetchall():
+            known.add(storage_key)
+            if thumb_key:
+                known.add(thumb_key)
 
     orphans = [
         key
@@ -444,7 +468,7 @@ def list_gallery(
     """
     with conn.cursor() as cur:
         cur.execute(
-            f"""SELECT id, storage_key, content_type, width, height
+            f"""SELECT id, storage_key, thumb_key, content_type, width, height
                 FROM {PHOTOS_TABLE}
                 ORDER BY created_at DESC
                 LIMIT %s OFFSET %s""",
@@ -456,9 +480,54 @@ def list_gallery(
         PhotoPublicOut(
             id=row[0],
             url=storage.create_download_url(row[1]),
-            content_type=row[2],
-            width=row[3],
-            height=row[4],
+            thumb_url=storage.create_download_url(row[2]) if row[2] else None,
+            content_type=row[3],
+            width=row[4],
+            height=row[5],
         )
         for row in rows
     ]
+
+
+@app.patch("/photos/{photo_id}/thumbnail", response_model=PhotoCreateResponse)
+def attach_thumbnail(
+    photo_id: int,
+    body: PhotoThumbnailAttach,
+    _: None = Depends(require_api_key),
+    __: None = Depends(require_storage),
+    conn: psycopg2.extensions.connection = Depends(get_db),
+):
+    """
+    Point an existing photo at a thumbnail that is already in the bucket.
+
+    Used by backfill_thumbnails.py, which generates the renditions locally and
+    uploads them — so this service needs no image library, and a one-off job
+    cannot take the API down.
+
+    Loss-proof by construction: the only column written is thumb_key, the
+    object is verified present first, and nothing is ever deleted here.
+    """
+    if not body.thumb_key.startswith(f"{storage.KEY_PREFIX}/"):
+        raise HTTPException(status_code=400, detail="Ogiltig fil-referens.")
+
+    exists, _size = storage.object_exists(body.thumb_key)
+    if not exists:
+        raise HTTPException(status_code=404, detail="Miniatyren hittades inte i lagringen.")
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT storage_key FROM {PHOTOS_TABLE} WHERE id = %s""",
+            (photo_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Bilden hittades inte.")
+        if row[0] == body.thumb_key:
+            raise HTTPException(status_code=400, detail="Miniatyren kan inte vara originalet.")
+
+        cur.execute(
+            f"UPDATE {PHOTOS_TABLE} SET thumb_key = %s WHERE id = %s",
+            (body.thumb_key, photo_id),
+        )
+
+    return PhotoCreateResponse(id=photo_id, message="Miniatyren kopplad.")

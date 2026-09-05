@@ -26,12 +26,7 @@ S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL")
 S3_REGION = os.environ.get("S3_REGION", "us-east-1")
 
 # How long a guest has to finish an upload once the form is issued.
-#
-# Generous on purpose: a 1 GB video over venue wifi at 2 Mbps takes over an
-# hour, and the old one-hour window expired mid-upload — failing at the very
-# end, after the guest had already waited. The policy still pins the key, the
-# content type and the size, so a longer-lived form grants nothing extra.
-UPLOAD_URL_TTL_SECONDS = 6 * 60 * 60
+UPLOAD_URL_TTL_SECONDS = 60 * 60
 # How long an admin gallery link stays valid.
 DOWNLOAD_URL_TTL_SECONDS = 60 * 60 * 6
 
@@ -70,23 +65,7 @@ EXTENSION_BY_TYPE = {
 
 MIN_UPLOAD_BYTES = 1024                      # 1 KB — reject empty/garbage
 MAX_IMAGE_BYTES = 25 * 1024 * 1024           # 25 MB — well above any phone photo
-
-# 2 GB, chosen so five minutes of video fits at any setting a phone is likely
-# to be on.
-#
-# Measured from the videos guests have actually uploaded, all 1080p or 720p:
-# about 110 MB per minute, so five minutes is roughly 570 MB and this leaves
-# ample room. The reason for going beyond that is 4K — nobody has used it yet,
-# but 4K/30 runs around 375 MB per minute, which puts five minutes at about
-# 1.9 GB. One guest with that setting on would otherwise be cut off mid-speech.
-#
-# 4K/60 (around 750 MB per minute) still will not fit five minutes, and cannot
-# reasonably: that is nearly 4 GB, over an hour of uploading on mobile data. The
-# too-large message says what to do instead.
-#
-# The practical ceiling here is patience, not storage. At a typical 8 Mbps
-# uplink 2 GB takes about half an hour, and an interrupted upload restarts.
-MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024
+MAX_VIDEO_BYTES = 200 * 1024 * 1024          # 200 MB — a short clip, not a feature film
 
 
 class StorageNotConfigured(RuntimeError):

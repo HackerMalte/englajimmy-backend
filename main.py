@@ -16,7 +16,7 @@ from fastapi.security import APIKeyHeader
 
 import storage
 from db.connection import get_conn
-from ratelimit import charge_bytes, check_upload_quota
+from ratelimit import check_upload_quota
 from schemas.input import (
     PhotoCountOut,
     PhotoPublicOut,
@@ -265,16 +265,10 @@ def create_upload_urls(
             )
         limit = storage.max_bytes_for(content_type)
         if item.size_bytes > limit:
-            # Say what to do about it, not just that it failed. Someone hitting
-            # this on a video is almost certainly filming in 4K.
-            if content_type in storage.ALLOWED_VIDEO_TYPES:
-                detail = (
-                    f"Filmen är för stor (max {limit // (1024 * 1024 * 1024)} GB). "
-                    "Spela in en kortare bit, eller filma i 1080p i stället för 4K."
-                )
-            else:
-                detail = f"Filen är för stor (max {limit // (1024 * 1024)} MB)."
-            raise HTTPException(status_code=413, detail=detail)
+            raise HTTPException(
+                status_code=413,
+                detail=f"Filen är för stor (max {limit // (1024 * 1024)} MB).",
+            )
         targets.append(PhotoUploadTarget(**storage.create_upload_form(content_type)))
 
     return PhotoUploadResponse(targets=targets)
@@ -302,10 +296,6 @@ def create_photo(
     exists, size_bytes = storage.object_exists(body.storage_key)
     if not exists:
         raise HTTPException(status_code=404, detail="Filen hittades inte i lagringen.")
-
-    # Charge the size the bucket reports, not what the client claimed, so the
-    # hourly data budget cannot be dodged by under-declaring a file.
-    charge_bytes(request, size_bytes)
 
     # The presigned policy pins the declared type but cannot read the bytes, so
     # confirm the file really is media before recording it. Junk is deleted.

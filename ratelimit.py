@@ -16,11 +16,8 @@ WINDOW_SECONDS = 60 * 60
 
 # Two budgets per IP per hour, with distinct jobs:
 #
-#   MAX_BYTES     bounds how much data can land in the bucket. With videos of up
-#                 to 1 GB, a file count alone no longer bounds anything useful:
-#                 600 files could mean 600 GB.
-#   MAX_FILES     bounds how many objects can land, sized for a guest emptying a
-#                 camera roll.
+#   MAX_FILES     bounds how much can land in the bucket. This is the one meant
+#                 to bind, and it is sized for a guest emptying a camera roll.
 #   MAX_REQUESTS  bounds request flooding, nothing else. It must stay well
 #                 above what legitimate uploading costs, or it binds first and
 #                 the file budget never applies.
@@ -35,20 +32,8 @@ WINDOW_SECONDS = 60 * 60
 MAX_FILES = 600
 MAX_REQUESTS = 1_000
 
-# 20 GB/hour/IP. Far beyond any real guest — a camera roll of 300 photos plus a
-# handful of long videos lands nowhere near it — while turning an open upload
-# endpoint from "600 GB an hour" into something survivable.
-#
-# Charged from the size the bucket reports once a file has landed, not from what
-# the client claimed, so it cannot be dodged by under-declaring. The cost is that
-# the budget is checked before an upload and charged after: someone already at
-# the limit is refused their next upload rather than mid-transfer, so they can
-# overshoot by at most one file.
-MAX_BYTES = 20 * 1024 * 1024 * 1024
-
 _requests: dict[str, deque[float]] = defaultdict(deque)
 _files: dict[str, deque[float]] = defaultdict(deque)
-_bytes: dict[str, deque[tuple[float, int]]] = defaultdict(deque)
 
 
 def client_ip(request: Request) -> str:
@@ -67,24 +52,6 @@ def _prune(stamps: deque[float], now: float) -> None:
         stamps.popleft()
 
 
-def _prune_bytes(stamps: deque[tuple[float, int]], now: float) -> None:
-    while stamps and now - stamps[0][0] > WINDOW_SECONDS:
-        stamps.popleft()
-
-
-def charge_bytes(request: Request, size_bytes: int) -> None:
-    """
-    Record data that actually landed in the bucket, against this IP's hourly
-    budget. Called once a file is stored, with the size the bucket reports.
-    """
-    if size_bytes <= 0:
-        return
-    now = time.monotonic()
-    stamps = _bytes[client_ip(request)]
-    _prune_bytes(stamps, now)
-    stamps.append((now, size_bytes))
-
-
 def check_upload_quota(request: Request, file_count: int = 1) -> None:
     """
     Charge one request plus `file_count` files against this IP's hourly budget.
@@ -100,16 +67,8 @@ def check_upload_quota(request: Request, file_count: int = 1) -> None:
 
     request_stamps = _requests[ip]
     file_stamps = _files[ip]
-    byte_stamps = _bytes[ip]
     _prune(request_stamps, now)
     _prune(file_stamps, now)
-    _prune_bytes(byte_stamps, now)
-
-    if sum(size for _stamp, size in byte_stamps) >= MAX_BYTES:
-        raise HTTPException(
-            status_code=429,
-            detail="Du har laddat upp väldigt mycket den senaste timmen. Försök igen senare.",
-        )
 
     if len(request_stamps) >= MAX_REQUESTS:
         raise HTTPException(
